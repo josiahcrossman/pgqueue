@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: pgqueue-postgres
+    environment:
+      POSTGRES_USER: pgqueue
+      POSTGRES_PASSWORD: pgqueue
+      POSTGRES_DB: pgqueue
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgqueue-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgqueue -d pgqueue"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+volumes:
+  pgqueue-data:

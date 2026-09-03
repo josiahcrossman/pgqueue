@@ -1,0 +1,24 @@
+-- 0001_init.up.sql
+--
+-- STUB — intentionally left empty. This is the core of the learning exercise:
+-- YOU design the `jobs` table DDL and its indexes.
+--
+-- The rest of the codebase (queue.go, worker.go, the tests) expects a table
+-- named `jobs` with at least these columns. Column names below are what the Go
+-- struct scanning assumes (see internal/queue/queue.go, Job + rowToJob); if you
+-- rename them, update the SQL you write in the stubs to match.
+--
+--   id          -- primary key, auto-generated (bigint/bigserial or identity)
+--   type        -- job type string, used to look up the handler
+--   payload     -- jsonb, the job's input
+--   status      -- queued | running | done | failed
+--   attempts    -- how many times this job has been tried (starts at 0)
+--   run_after   -- timestamptz; job is not eligible until now() >= run_after
+--   locked_at   -- timestamptz, nullable; when a worker claimed it (NULL = unclaimed)
+--   created_at  -- timestamptz
+--   updated_at  -- timestamptz
+--
+-- Indexes: decide these yourself. Think about what the claim query filters and
+-- orders by, and what keeps concurrent claims from serializing on a table scan.
+--
+-- Write your CREATE TABLE (and any CREATE INDEX) statements below this line.
