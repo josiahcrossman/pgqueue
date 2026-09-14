@@ -59,7 +59,19 @@ func New(pool *pgxpool.Pool, cfg config.Config, log *slog.Logger) *Queue {
 // TODO: write the INSERT. It should set type and payload from the arguments,
 // initialise the lifecycle columns, and return the new id.
 func (q *Queue) Enqueue(ctx context.Context, jobType string, payload []byte) (int64, error) {
-	panic("TODO: write INSERT")
+	query := `
+		INSERT INTO jobs (type, payload, status, attempts, run_after, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id;
+	`
+	time := time.Now()
+	row := q.pool.QueryRow(ctx, query, jobType, payload, StatusQueued, 0, time, time, time)
+	var id int64
+	err := row.Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // claimBatch atomically claims up to batchSize jobs that are eligible to run
@@ -77,7 +89,39 @@ func (q *Queue) Enqueue(ctx context.Context, jobType string, payload []byte) (in
 //
 // TODO: write claim query and decide the transaction boundary.
 func (q *Queue) claimBatch(ctx context.Context, batchSize int) ([]Job, error) {
-	panic("TODO: write claim query and decide the transaction boundary")
+	
+	query := `
+		WITH candidates AS (
+			SELECT id
+			FROM jobs
+			WHERE status = 'queued'
+			AND run_after <= now()
+			ORDER BY run_after
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE jobs
+		SET status = 'running', locked_at = now(), updated_at = now()
+		FROM candidates
+		WHERE jobs.id = candidates.id
+		RETURNING ` + jobColumns + `;
+	`
+	rows, err := q.pool.Query(ctx, query, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	jobs := []Job{}
+	for rows.Next() {
+		job, err := rowToJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, nil
+
 }
 
 // markDone marks a claimed job as successfully completed.
@@ -85,7 +129,16 @@ func (q *Queue) claimBatch(ctx context.Context, batchSize int) ([]Job, error) {
 // TODO: write the UPDATE that transitions the job to StatusDone and clears its
 // lock.
 func (q *Queue) markDone(ctx context.Context, jobID int64) error {
-	panic("TODO: write markDone UPDATE")
+	query := `
+		UPDATE jobs
+		SET status = 'done', locked_at = NULL, updated_at = now()
+		WHERE id = $1;
+	`
+	_, err := q.pool.Exec(ctx, query, jobID)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // markFailed records a failed attempt. attempts is the job's attempt count
@@ -97,7 +150,28 @@ func (q *Queue) markDone(ctx context.Context, jobID int64) error {
 //
 // TODO: write the UPDATE(s) implementing that retry-or-fail decision.
 func (q *Queue) markFailed(ctx context.Context, jobID int64, attempts int, runErr error) error {
-	panic("TODO: write markFailed UPDATE")
+	if attempts < q.cfg.MaxAttempts {
+		query := `
+			UPDATE jobs
+			SET status = 'queued', locked_at = NULL, updated_at = now(), attempts = $3, run_after = now() + $2
+			WHERE id = $1;
+		`
+		_, err := q.pool.Exec(ctx, query, jobID, q.backoff(attempts), attempts)
+		if err != nil {
+			return err
+		}
+	}else {	
+		query := `
+			UPDATE jobs
+			SET status = 'failed', locked_at = NULL, updated_at = now(), attempts = $2
+			WHERE id = $1;
+		`
+		_, err := q.pool.Exec(ctx, query, jobID, attempts)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // backoff returns the delay before a job's next attempt using exponential
@@ -137,4 +211,4 @@ func rowToJob(row pgx.Row) (Job, error) {
 
 // jobColumns lists the columns, in scan order, that rowToJob expects. Handy for
 // building the SELECT/RETURNING list in the claim query you write.
-const jobColumns = "id, type, payload, status, attempts, run_after, locked_at, created_at, updated_at"
+const jobColumns = "jobs.id, jobs.type, jobs.payload, jobs.status, jobs.attempts, jobs.run_after, jobs.locked_at, jobs.created_at, jobs.updated_at"

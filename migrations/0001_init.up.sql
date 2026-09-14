@@ -22,3 +22,18 @@
 -- orders by, and what keeps concurrent claims from serializing on a table scan.
 --
 -- Write your CREATE TABLE (and any CREATE INDEX) statements below this line.
+CREATE TABLE if NOT EXISTS jobs (
+    id BIGSERIAL PRIMARY KEY,
+    type VARCHAR(255) NOT NULL,
+    payload JSONB NOT NULL,
+    status VARCHAR(255) NOT NULL,
+    attempts INT NOT NULL,
+    run_after TIMESTAMPTZ NOT NULL,
+    locked_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_queued_run_after ON jobs (run_after) WHERE status = 'queued';
+
+EXPLAIN ANALYZE SELECT * FROM jobs WHERE status = 'queued' AND run_after <= now() ORDER BY run_after LIMIT 10;

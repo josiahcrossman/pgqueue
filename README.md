@@ -109,6 +109,58 @@ test               integration tests (build tag: integration)
 
 ## Findings
 
-<!-- Record what you learn here: which locking approach you chose for
-     claimBatch and why, index choices, throughput numbers from the loadtest,
-     anything that surprised you. -->
+**Schema:** `run_after`, `locked_at`, `created_at`, `updated_at` are all
+`TIMESTAMPTZ`, not `TIMESTAMP`. An earlier draft used bare `TIMESTAMP`, which
+would have compared against `now()` (a `timestamptz`) using the session's
+timezone setting for the implicit cast — a silent source of drift if the app
+and DB ever disagreed on timezone.
+
+**Index:** a partial index, `CREATE INDEX ... ON jobs (run_after) WHERE status
+= 'queued'`. A plain composite index on `(status, run_after)` would also work,
+but it indexes every row regardless of status, so it grows forever as jobs
+accumulate in `done`/`failed`. The partial index only ever contains rows the
+claim query actually cares about, so it stays small for the life of the table.
+
+**Locking:** `claimBatch` is a single statement — a `WITH candidates AS
+(SELECT ... FOR UPDATE SKIP LOCKED) UPDATE jobs ... FROM candidates`. Row-level
+locking (`FOR UPDATE`) means the moment a row is selected, it's already
+claimed; `SKIP LOCKED` means a worker that encounters a row another worker
+currently holds doesn't block waiting for it — it just moves on to the next
+eligible row. Combining the select and the update into one statement, with
+`LIMIT` inside the CTE, means the claim is a single short transaction that
+commits as soon as it completes; job execution and `markDone`/`markFailed`
+happen in separate, later transactions, so a slow or hanging handler never
+holds a claim-time lock open.
+
+**Bugs found while building this (in the order they surfaced):**
+1. `markFailed` was missing a final `return nil` — compile error.
+2. `claimBatch` had a `return jobs, nil` before the `rows.Err()` check, making
+   the error check dead code — iteration errors were silently swallowed.
+3. `markFailed`'s retry branch didn't persist `attempts` or apply
+   `q.backoff()` at all — every failure went straight to permanently failed on
+   the first attempt.
+4. Fixed to persist `attempts` in the retry branch, but the permanent-failure
+   branch still didn't — so a job that exhausted its attempts ended at
+   `status = failed` with `attempts` one short of `MaxAttempts`.
+5. `RETURNING id, ...` in `claimBatch` failed with `column reference "id" is
+   ambiguous` — the `candidates` CTE also projects a column named `id`, so
+   once it's joined into the `UPDATE ... FROM candidates`, plain `id` could
+   mean either table. Fixed by qualifying every column in `jobColumns` with
+   `jobs.`. This one didn't show up as a wrong answer — the query errored on
+   every call, so nothing was ever claimed at all, and jobs just piled up as
+   `queued` while every integration test time out.
+
+**Loadtest:** 20,000 jobs, `WORKER_COUNT=4`, `BATCH_SIZE=10`: **4,756
+jobs/sec**, 4.2s wall time, exactly-once holds (every job has exactly one
+`job_runs` row with `run_count = 1`).
+
+**Integration tests:** all three pass against real Postgres 16 (no mocks).
+
+## Backlog / known limitations
+
+- **Stale lock reclaim**: if a worker dies mid-job (crash, OOM-kill, deploy),
+  the job it claimed stays at `status = running` forever — `locked_at` exists
+  to support detecting this (a `running` row whose `locked_at` is older than
+  some timeout is almost certainly orphaned) but the reclaim logic itself is
+  not built. Not covered by the current integration tests, which only exercise
+  healthy workers. Deferred deliberately, not an oversight.
