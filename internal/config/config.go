@@ -11,24 +11,26 @@ import (
 // Config holds everything the worker and queue need to run. Values come from
 // the environment via Load; every field has a default except DatabaseURL.
 type Config struct {
-	DatabaseURL  string        // DATABASE_URL (required)
-	WorkerCount  int           // WORKER_COUNT
-	PollInterval time.Duration // POLL_INTERVAL
-	BatchSize    int           // BATCH_SIZE
-	MaxAttempts  int           // MAX_ATTEMPTS
-	BaseBackoff  time.Duration // BASE_BACKOFF
+	DatabaseURL      string        // DATABASE_URL (required)
+	WorkerCount      int           // WORKER_COUNT
+	PollInterval     time.Duration // POLL_INTERVAL
+	BatchSize        int           // BATCH_SIZE
+	MaxAttempts      int           // MAX_ATTEMPTS
+	BaseBackoff      time.Duration // BASE_BACKOFF
+	StaleLockTimeout time.Duration // STALE_LOCK_TIMEOUT
 }
 
 // Load reads configuration from the environment, applies defaults for anything
 // unset, and validates the result. DATABASE_URL is the only required variable.
 func Load() (Config, error) {
 	cfg := Config{
-		DatabaseURL:  os.Getenv("DATABASE_URL"),
-		WorkerCount:  4,
-		PollInterval: 500 * time.Millisecond,
-		BatchSize:    10,
-		MaxAttempts:  5,
-		BaseBackoff:  1 * time.Second,
+		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		WorkerCount:      4,
+		PollInterval:     500 * time.Millisecond,
+		BatchSize:        10,
+		MaxAttempts:      5,
+		BaseBackoff:      1 * time.Second,
+		StaleLockTimeout: 5 * time.Minute,
 	}
 
 	var err error
@@ -45,6 +47,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.BaseBackoff, err = durationEnv("BASE_BACKOFF", cfg.BaseBackoff); err != nil {
+		return Config{}, err
+	}
+	if cfg.StaleLockTimeout, err = durationEnv("STALE_LOCK_TIMEOUT", cfg.StaleLockTimeout); err != nil {
 		return Config{}, err
 	}
 
@@ -72,6 +77,9 @@ func (c Config) validate() error {
 	}
 	if c.BaseBackoff <= 0 {
 		return fmt.Errorf("config: BASE_BACKOFF must be > 0, got %s", c.BaseBackoff)
+	}
+	if c.StaleLockTimeout <= 0 {
+		return fmt.Errorf("config: STALE_LOCK_TIMEOUT must be > 0, got %s", c.StaleLockTimeout)
 	}
 	return nil
 }

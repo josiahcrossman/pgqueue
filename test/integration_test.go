@@ -38,12 +38,13 @@ func testConfig(t *testing.T) config.Config {
 		url = defaultTestDBURL
 	}
 	return config.Config{
-		DatabaseURL:  url,
-		WorkerCount:  2,
-		PollInterval: 20 * time.Millisecond,
-		BatchSize:    5,
-		MaxAttempts:  3,
-		BaseBackoff:  50 * time.Millisecond,
+		DatabaseURL:      url,
+		WorkerCount:      2,
+		PollInterval:     20 * time.Millisecond,
+		BatchSize:        5,
+		MaxAttempts:      3,
+		BaseBackoff:      50 * time.Millisecond,
+		StaleLockTimeout: time.Minute,
 	}
 }
 

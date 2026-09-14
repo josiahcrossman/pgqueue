@@ -39,19 +39,50 @@ func (w *Worker) Run(ctx context.Context) error {
 	)
 
 	var wg sync.WaitGroup
-	for i := 0; i < w.cfg.WorkerCount; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			w.runLoop(ctx, id)
-		}(i)
+	for i := 0; i < w.cfg.WorkerCount + 1; i++ {
+		if i == w.cfg.WorkerCount {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				w.reclaimStaleLoop(ctx)
+			}()
+		}else {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				w.runLoop(ctx, id)
+			}(i)
+		}
 	}
 
 	wg.Wait()
 	w.log.Info("worker pool stopped")
 	return nil
 }
+func (w *Worker) reclaimStaleLoop(ctx context.Context) {
+	log := w.log.With("worker", "reclaimer")
+	log.Debug("reclaim stale loop started")
 
+	for {
+		if ctx.Err() != nil {
+			log.Debug("reclaim stale loop exiting")
+			return
+		}
+
+		count, err := w.q.reclaimStale(ctx, w.cfg.StaleLockTimeout)
+		if err != nil {
+			log.Error("reclaim stale failed", "error", err)
+			if w.sleep(ctx, w.cfg.PollInterval) {
+				return
+			}
+		}
+
+		log.Info("reclaimed stale jobs", "count", count)
+		if w.sleep(ctx, w.cfg.PollInterval) {
+			return
+		}
+	}
+}
 // runLoop is one worker goroutine. It repeatedly claims a batch and processes
 // it. When there is no work it sleeps for the poll interval. It exits once ctx
 // is cancelled — after finishing any batch already in hand.

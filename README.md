@@ -156,11 +156,49 @@ jobs/sec**, 4.2s wall time, exactly-once holds (every job has exactly one
 
 **Integration tests:** all three pass against real Postgres 16 (no mocks).
 
-## Backlog / known limitations
+**Stale lock reclaim:** `reclaimStale` finds jobs stuck at `status = running`
+because the worker that claimed them died before calling `markDone`/
+`markFailed`, and recovers them through the same retry/backoff/give-up path as
+`markFailed`. Runs continuously as its own goroutine (`reclaimStaleLoop`) in
+`Worker.Run`, gated by a new `STALE_LOCK_TIMEOUT` config value (default `5m`)
+— deliberately a separate knob from `POLL_INTERVAL`, since conflating them
+would mean any handler slower than one poll tick gets its in-progress job
+reclaimed out from under it.
 
-- **Stale lock reclaim**: if a worker dies mid-job (crash, OOM-kill, deploy),
-  the job it claimed stays at `status = running` forever — `locked_at` exists
-  to support detecting this (a `running` row whose `locked_at` is older than
-  some timeout is almost certainly orphaned) but the reclaim logic itself is
-  not built. Not covered by the current integration tests, which only exercise
-  healthy workers. Deferred deliberately, not an oversight.
+Same atomicity lesson as `claimBatch`, applied a second time: the first
+working version split "find stale candidates" (a `SELECT ... FOR UPDATE SKIP
+LOCKED`) from "mark them failed" (a separate `markFailed` call) into two
+statements. Since a `SELECT` autocommits as its own transaction, the row lock
+was released the instant the `SELECT` finished — before `markFailed` ever ran
+— so nothing durable prevented two concurrent reclaim sweeps from grabbing the
+same orphaned row. Fixed by folding the claim into one atomic statement, same
+shape as `claimBatch`: `WITH candidates AS (SELECT ... FOR UPDATE SKIP LOCKED)
+UPDATE jobs SET locked_at = now() FROM candidates ...`. Bumping `locked_at`
+forward *inside* that single statement means a second concurrent sweep's own
+`locked_at < now() - staleAfter` check now durably excludes the row, the same
+way `claimBatch`'s status flip excludes an already-claimed job — the row
+doesn't need the lock anymore to stay protected once its state has moved.
+
+**Bugs found building the reclaim feature:**
+1. `RETURNING` on a plain `SELECT` — not valid SQL; `RETURNING` only exists on
+   `INSERT`/`UPDATE`/`DELETE`.
+2. `now() - $1::interval` where `$1` is a plain number — Postgres has no cast
+   from a bare integer/float to `interval`. Fixed with
+   `make_interval(secs => $1)`.
+3. The two-statement select-then-markFailed race described above.
+4. A worker-loop wiring bug: called `w.reclaimStale` instead of
+   `w.q.reclaimStale` (wrong receiver type) — caught at compile time.
+5. The reclaim goroutine wasn't in the `WaitGroup` and only ran once instead of
+   looping — fixed to loop with its own ticker and join shutdown properly.
+6. The reclaim's staleness threshold was wired to `PollInterval` (500ms
+   default) instead of a dedicated value — would have reclaimed jobs still
+   being legitimately processed by a live worker. Fixed by adding
+   `STALE_LOCK_TIMEOUT` as its own config field.
+7. After all of the above was fixed, `TestConcurrentWorkersProcessEachJobOnce`
+   started failing with 90/300 jobs running more than once. Root cause: my
+   own test scaffolding (`test/integration_test.go`'s `testConfig()`) predated
+   the `StaleLockTimeout` field and never set it, so it defaulted to Go's zero
+   value — a 0-second staleness threshold meant *every* `running` job looked
+   instantly orphaned to the newly-added reclaim loop, regardless of how
+   recently it had actually been claimed. Not a bug in the reclaim logic
+   itself; fixed by setting `StaleLockTimeout` explicitly in the test config.

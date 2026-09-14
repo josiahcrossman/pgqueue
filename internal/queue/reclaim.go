@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -28,5 +29,39 @@ import (
 //
 // TODO: write reclaim query and decide the transaction boundary.
 func (q *Queue) reclaimStale(ctx context.Context, staleAfter time.Duration) (int, error) {
-	panic("TODO: write reclaim query and decide the transaction boundary")
+	query := `	
+		WITH candidates AS (
+			SELECT id
+			FROM jobs
+			WHERE status = 'running'
+			AND locked_at < now() - make_interval(secs => $1)
+			ORDER BY locked_at
+			LIMIT 100
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE jobs
+		SET locked_at = now()
+		FROM candidates
+		WHERE jobs.id = candidates.id
+		RETURNING ` + jobColumns + `;
+	`
+	rows, err := q.pool.Query(ctx, query, staleAfter.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		job, err := rowToJob(rows)
+		if err != nil {
+			return 0, err
+		}
+		err = q.markFailed(ctx, job.ID, job.Attempts + 1, errors.New("job timed out"))
+		if err != nil {
+			return 0, err
+		}
+		count++
+	}
+	return count, nil
 }
